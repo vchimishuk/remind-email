@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import sys
+import argparse
+import subprocess
+
+
+def die(msg, status=1):
+    print(sys.argv[0] + ":", msg, file=sys.stderr)
+    sys.exit(status)
+
+
+def config_dir():
+    d = os.environ.get("XDG_CONFIG_HOME")
+    if not d:
+        h = os.environ.get("HOME")
+        if not h:
+            die("HOME environment variable is empty")
+        d = h + "/.config"
+
+    return d + "/remind-email"
+
+
+def config_get(fname, prop):
+    with open(fname, "r") as f:
+        for l in f.readlines():
+            m = re.match(f"{prop} *= *([^#]+)", l)
+            if m:
+                return m.group(1).strip()
+
+    die(f"{fname}: {prop} property not found or empty")
+
+
+def reminds(remdir):
+    p = subprocess.run(["remind", remdir], capture_output=True)
+    if p.returncode:
+        die(f"remind: {p.stderr.decode()}", status=p.returncode)
+
+    out = p.stdout.decode().splitlines()
+    if len(out) == 1:
+        return None, None
+
+    subj = out[0].replace(" (today):", "")
+    body = subj + ":\n\n" + "\n".join(out[2:])
+
+    return subj, body
+
+
+def email(host, user, password, sender, recipient, msg):
+    p = subprocess.run(["msmtp",
+                        f"--host={host}",
+                        f"--user={user}",
+                        f"--passwordeval=echo {password}",
+                        f"-f {sender}",
+                        f"{recipient}"],
+                       input=msg.encode(),
+                       capture_output=True)
+    if p.returncode:
+        die(f"msmtp: {p.stderr.decode()}", status=p.returncode)
+
+
+descr = "send reminds produced by remind command via email"
+ap = argparse.ArgumentParser(prog="remind-email",
+                             description=descr)
+ap.add_argument("-c", type=str, metavar="file", dest="config",
+                help="configuration file to use")
+ap.add_argument("-n", action="store_true", dest="noemail",
+                help="print data to stdout instead of calling MTA")
+ap.add_argument("-r", type=str, metavar="file", dest="reminds",
+                help="remind file or directory to use")
+args = ap.parse_args()
+
+cfg_file = args.config
+if not cfg_file:
+    cfg_file = config_dir() + "/remind-email.conf"
+rem_file = args.reminds
+if not rem_file:
+    rem_file = config_dir() + "/reminds"
+
+smtp_host = config_get(cfg_file, "smtp-host")
+smtp_user = config_get(cfg_file, "smtp-user")
+smtp_pass = config_get(cfg_file, "smtp-pass")
+sender = config_get(cfg_file, "sender")
+recipient = config_get(cfg_file, "recipient")
+
+subj, body = reminds(rem_file)
+if not subj:
+    # No reminders for today, exiting.
+    sys.exit(0)
+
+msg = f"Subject: {subj}\n\n{body}"
+if args.noemail:
+    print(msg)
+else:
+    email(host=smtp_host, user=smtp_user, password=smtp_pass,
+          sender=sender, recipient=recipient, msg=msg)
